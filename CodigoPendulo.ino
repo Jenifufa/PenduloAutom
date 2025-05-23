@@ -16,13 +16,12 @@
 
 // Péndulo
 #define PENDULUM_LENGTH 0.26 // Metros (L)
-#define NUM_OSCILLATIONS_FOR_AVG 10
+#define NUM_OSCILLATIONS_FOR_AVG 10 // Número de oscilaciones COMPLETAS (T) a promediar
 #define KNOWN_GRAVITY 9.80665 // m/s^2
-#define INITIAL_RELEASE_ANGLE_DEGREES 30.0 // Ángulo inicial de liberación
+#define INITIAL_RELEASE_ANGLE_DEGREES 35.0 // Ángulo inicial de liberación
 
 // Servomotor
-// DEBES AJUSTAR ESTE ÁNGULO MECÁNICAMENTE PARA QUE CORRESPONDA A 50 GRADOS
-#define SERVO_HOLD_ANGLE 0   // Ángulo para sostener la pesa (ajusta esto para 50 grados)
+#define SERVO_HOLD_ANGLE 0   // Ángulo para sostener la pesa
 #define SERVO_RELEASE_ANGLE 90 // Ángulo para liberar la pesa
 
 // Constantes para filtrado e incertidumbre
@@ -36,7 +35,6 @@ LiquidCrystal_I2C lcd(LCD_ADDRESS, LCD_COLS, LCD_ROWS);
 Servo pendulumServo;
 
 // Estados del sistema
-// ESTA ES LA DEFINICIÓN QUE FALTABA O ESTABA MAL COLOCADA
 enum SystemState {
   STATE_IDLE,
   STATE_RELEASING,
@@ -44,13 +42,14 @@ enum SystemState {
   STATE_TIMING_HALF_PERIOD,
   STATE_CALCULATING
 };
-SystemState currentState = STATE_IDLE; // Ahora STATE_IDLE es conocido
+SystemState currentState = STATE_IDLE;
 
 // Variables para la medición
 unsigned long firstPassTime_ms = 0;
-unsigned long all_measured_periods_ms[NUM_OSCILLATIONS_FOR_AVG];
+// all_measured_periods_ms almacenará los períodos COMPLETOS (T)
+unsigned long all_measured_periods_ms[NUM_OSCILLATIONS_FOR_AVG]; 
 unsigned long filtered_periods_ms[N_FILTERED_VALUES];
-int oscillationCount = 0;
+int oscillationCount = 0; // Contador de oscilaciones COMPLETAS (T)
 bool sensorState = false;
 bool lastSensorState = false;
 bool sensorDebounceLock = false;
@@ -75,25 +74,24 @@ void setup() {
   lcd.setCursor(0, 1);
   lcd.print("Presiona boton");
 
-
   pendulumServo.write(SERVO_HOLD_ANGLE);
-  currentState = STATE_IDLE; // Correcto
+  currentState = STATE_IDLE;
 }
 
 void loop() {
   sensorState = (digitalRead(SENSOR_PIN) == LOW); 
 
   switch (currentState) {
-    case STATE_IDLE: // Correcto
+    case STATE_IDLE:
       if (digitalRead(BUTTON_PIN) == LOW) {
         delay(50);
         if (digitalRead(BUTTON_PIN) == LOW) {
-          currentState = STATE_RELEASING; // Correcto
+          currentState = STATE_RELEASING;
         }
       }
       break;
 
-    case STATE_RELEASING: // Correcto
+    case STATE_RELEASING:
       lcd.clear();
       lcd.print("Soltando pesa...");
       lcd.setCursor(0,1);
@@ -110,15 +108,15 @@ void loop() {
       oscillationCount = 0;
       sensorDebounceLock = false;
       lastSensorState = false;
-      currentState = STATE_ARMING_FIRST_PASS; // Correcto
+      currentState = STATE_ARMING_FIRST_PASS;
       break;
 
-    case STATE_ARMING_FIRST_PASS: // Correcto
+    case STATE_ARMING_FIRST_PASS:
       if (sensorState && !lastSensorState && !sensorDebounceLock) {
         firstPassTime_ms = millis(); 
         sensorDebounceLock = true;
         lastSensorState = true;
-        currentState = STATE_TIMING_HALF_PERIOD; // Correcto
+        currentState = STATE_TIMING_HALF_PERIOD;
         Serial.println("ARMADO: Detectada 1ra senal (inicio de T/2).");
       } else if (!sensorState && lastSensorState) {
          sensorDebounceLock = false;
@@ -126,31 +124,34 @@ void loop() {
       }
       break;
 
-    case STATE_TIMING_HALF_PERIOD: // Correcto
+    case STATE_TIMING_HALF_PERIOD:
       if (sensorState && !lastSensorState && !sensorDebounceLock) {
         unsigned long currentTime_ms = millis(); 
-        unsigned long halfPeriod_ms = currentTime_ms - firstPassTime_ms;
-        unsigned long fullPeriod_ms = halfPeriod_ms * 2; 
+        unsigned long halfPeriod_ms = currentTime_ms - firstPassTime_ms; // Intervalo T/2
+        unsigned long fullPeriod_ms = halfPeriod_ms * 2; // Período T completo
 
         if (oscillationCount < NUM_OSCILLATIONS_FOR_AVG) {
-          all_measured_periods_ms[oscillationCount] = fullPeriod_ms;
+          all_measured_periods_ms[oscillationCount] = fullPeriod_ms; // Se guarda el T completo
           
           Serial.print("Oscilacion Completa "); Serial.print(oscillationCount + 1);
           Serial.print(": Intervalo(T/2) = "); Serial.print(halfPeriod_ms);
           Serial.print(" ms, Oscilacion Completa (T) = "); Serial.print(fullPeriod_ms); Serial.println(" ms");
 
           lcd.setCursor(0,1); 
-          lcd.print("Osc:"); lcd.print(oscillationCount + 1); 
-          lcd.print(" T:");lcd.print(fullPeriod_ms);      
+          lcd.print("Osc:"); lcd.print(oscillationCount + 1); // Contador de oscilaciones completas (T)
+          // ----- INICIO DE LA MODIFICACIÓN SOLICITADA -----
+          // Ahora muestra el halfPeriod_ms (intervalo T/2) en la LCD durante la medición
+          lcd.print(" t:");lcd.print(halfPeriod_ms); // Etiqueta "t:" y valor de T/2
+          // ----- FIN DE LA MODIFICACIÓN SOLICITADA -----
           lcd.print("ms    ");                            
         }
-        oscillationCount++; 
+        oscillationCount++; // Se incrementa el contador de oscilaciones completas (T)
         firstPassTime_ms = currentTime_ms; 
         sensorDebounceLock = true;
         lastSensorState = true;
 
         if (oscillationCount >= NUM_OSCILLATIONS_FOR_AVG) {
-          currentState = STATE_CALCULATING; // Correcto
+          currentState = STATE_CALCULATING;
         }
       } else if (!sensorState && lastSensorState) { 
          sensorDebounceLock = false; 
@@ -158,7 +159,7 @@ void loop() {
       }
       break;
 
-    case STATE_CALCULATING: // Correcto
+    case STATE_CALCULATING:
       lcd.clear();
       lcd.print("Calculando...");
       Serial.println("\nCalculando resultados...");
@@ -169,13 +170,15 @@ void loop() {
       lcd.print("Pendulo Simple");
       lcd.setCursor(0,1);
       lcd.print("Presiona boton");
-      currentState = STATE_IDLE; // Correcto
+      currentState = STATE_IDLE;
       break;
   }
 }
 
-
 // --- FUNCIONES DE CÁLCULO Y FILTRADO ---
+// (calculateAverageMs, findNClosestToAverage, calculateStdDevMs, calculateAndDisplayResults)
+// Estas funciones NO CAMBIAN y operarán sobre 'all_measured_periods_ms' 
+// que contiene los PERÍODOS COMPLETOS (T).
 
 float calculateAverageMs(unsigned long data[], int size) {
   if (size == 0) return 0.0;
@@ -254,11 +257,12 @@ void calculateAndDisplayResults() {
   }
   findNClosestToAverage(all_measured_periods_ms, oscillationCount, filtered_periods_ms, actual_num_to_filter_for_calc);
   
-  Serial.println("\n--- Periodos Filtrados (ms) ---");
+  Serial.println("\n--- Periodos COMPLETOS (T) Filtrados (ms) ---");
   for(int i=0; i<actual_num_to_filter_for_calc; ++i) {
     Serial.print("Tf"); Serial.print(i+1); Serial.print(": "); Serial.println(filtered_periods_ms[i]);
   }
 
+  // avg_measured_period_ms es el promedio de los PERÍODOS COMPLETOS (T) filtrados
   float avg_measured_period_ms = calculateAverageMs(filtered_periods_ms, actual_num_to_filter_for_calc);
   float avg_measured_period_s = avg_measured_period_ms / 1000.0; 
 
@@ -274,9 +278,11 @@ void calculateAndDisplayResults() {
       Serial.print("Periodo Corregido a angulo pequeno (T_corregido): "); Serial.print(avg_corrected_period_s, 4); Serial.println(" s");
   }
 
+  // std_dev_filtered_period_ms es la desviación de los PERÍODOS COMPLETOS (T) filtrados
   float std_dev_filtered_period_ms = calculateStdDevMs(filtered_periods_ms, actual_num_to_filter_for_calc, avg_measured_period_ms);
   float uncertainty_A_period_ms = (actual_num_to_filter_for_calc > 0) ? std_dev_filtered_period_ms / sqrt(actual_num_to_filter_for_calc) : 0.0;
   float uncertainty_C_period_ms = sqrt(pow(uncertainty_A_period_ms, 2) + pow(ERROR_TIPO_B_MS, 2));
+  // uncertainty_C_measured_period_s es la incertidumbre del PERÍODO COMPLETO (T) medido
   float uncertainty_C_measured_period_s = uncertainty_C_period_ms / 1000.0;
 
   double calculated_g = 0.0;
@@ -295,8 +301,10 @@ void calculateAndDisplayResults() {
   double percentError = (KNOWN_GRAVITY > 0.0001) ? (fabs(calculated_g - KNOWN_GRAVITY) / KNOWN_GRAVITY) * 100.0 : 0.0;
 
   lcd.clear();
+  // Muestra el promedio de los PERÍODOS COMPLETOS (T) medidos y filtrados
   lcd.print("Tmed(f):"); lcd.print(avg_measured_period_s, 3); lcd.print("s"); 
   lcd.setCursor(0, 1);
+  // Muestra la incertidumbre de ese promedio de PERÍODOS COMPLETOS (T)
   lcd.print("u(Tm):+/-"); lcd.print(uncertainty_C_measured_period_s, 3); 
 
   delay(5000); 
@@ -315,6 +323,7 @@ void calculateAndDisplayResults() {
   delay(5000);
 
   Serial.println("\n--- Resultados Finales ---");
+  // ... (resto de la salida serial no cambia y sigue refiriéndose a períodos completos T) ...
   Serial.print("Angulo Liberacion: "); Serial.print(INITIAL_RELEASE_ANGLE_DEGREES, 1); Serial.println(" grados");
   Serial.print("Periodo Medido Promedio Filtrado (T_medido): "); Serial.print(avg_measured_period_ms, 2); Serial.print(" ms ("); Serial.print(avg_measured_period_s, 4); Serial.println(" s)");
   if (INITIAL_RELEASE_ANGLE_DEGREES > 0.1) {
