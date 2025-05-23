@@ -1,0 +1,453 @@
+INCLUIR librería Wire          // Para comunicación I2C
+INCLUIR librería LiquidCrystal_I2C  // Para manejo del LCD
+INCLUIR librería Servo         // Para control del servomotor
+INCLUIR librería math          // Para funciones matemáticas (raíz, potencia, valor absoluto, PI, seno)
+// === DEFINICIÓN DE PINES ===
+DEFINIR BUTTON_PIN = 9         // Pin digital para el botón de inicio
+DEFINIR SERVO_PIN = 10         // Pin PWM para el servomotor
+DEFINIR SENSOR_PIN = 12        // Pin digital para el sensor de paso
+
+// === CONFIGURACIÓN DEL LCD ===
+DEFINIR LCD_ADDRESS = 0x27     // Dirección I2C del LCD (hexadecimal)
+DEFINIR LCD_COLS = 16          // Número de columnas del LCD
+DEFINIR LCD_ROWS = 2           // Número de filas del LCD
+
+// === CARACTERÍSTICAS DEL PÉNDULO ===
+DEFINIR PENDULUM_LENGTH = 0.26              // Longitud del péndulo en metros
+DEFINIR NUM_OSCILLATIONS_FOR_AVG = 10       // Número de oscilaciones a medir
+DEFINIR KNOWN_GRAVITY = 9.80665             // Valor conocido de gravedad (m/s²)
+DEFINIR INITIAL_RELEASE_ANGLE_DEGREES = 30.0 // Ángulo inicial de liberación
+
+// === CONFIGURACIÓN DEL SERVOMOTOR ===
+DEFINIR SERVO_HOLD_ANGLE = 0    // Posición para sostener la pesa
+DEFINIR SERVO_RELEASE_ANGLE = 90 // Posición para liberar la pesa
+// NOTA: Ajustar mecánicamente para que 0° corresponda a 50° reales
+
+// === CONFIGURACIÓN DE FILTRADO ===
+DEFINIR N_FILTERED_VALUES = 5        // Cantidad de valores filtrados para cálculo final
+// === PARÁMETROS DE INCERTIDUMBRE ===
+DEFINIR ERROR_LONGITUD = 0.001       // Error en medición de longitud (metros)
+DEFINIR ERROR_TIPO_B_MS = 1          // Error sistemático temporal (milisegundos)
+// === INSTANCIACIÓN DE OBJETOS ===
+CREAR lcd COMO LiquidCrystal_I2C(LCD_ADDRESS, LCD_COLS, LCD_ROWS)
+CREAR pendulumServo COMO Servo()
+// === ENUMERACIÓN DE ESTADOS DEL SISTEMA ===
+ENUMERAR SystemState {
+    STATE_IDLE,                 // Estado inactivo - esperando inicio
+    STATE_RELEASING,            // Estado liberando - soltando la pesa
+    STATE_ARMING_FIRST_PASS,    // Estado armado - detectando primer paso
+    STATE_TIMING_HALF_PERIOD,   // Estado midiendo - cronometrando períodos
+    STATE_CALCULATING           // Estado calculando - procesando resultados
+}
+
+// === VARIABLE DE ESTADO ACTUAL ===
+DECLARAR currentState COMO SystemState = STATE_IDLE
+// === VARIABLES TEMPORALES ===
+DECLARAR firstPassTime_ms COMO entero_largo_sin_signo = 0    // Tiempo del primer paso
+
+// === ARRAYS DE ALMACENAMIENTO ===
+DECLARAR all_measured_periods_ms[NUM_OSCILLATIONS_FOR_AVG] COMO entero_largo_sin_signo
+// Almacena todos los períodos medidos (sin filtrar)
+
+DECLARAR filtered_periods_ms[N_FILTERED_VALUES] COMO entero_largo_sin_signo  
+// Almacena los períodos filtrados estadísticamente
+
+// === CONTADORES Y BANDERAS ===
+DECLARAR oscillationCount COMO entero = 0          // Contador de oscilaciones completadas
+DECLARAR sensorState COMO booleano = falso         // Estado actual del sensor
+DECLARAR lastSensorState COMO booleano = falso     // Estado anterior del sensor
+DECLARAR sensorDebounceLock COMO booleano = falso  // Bandera anti-rebote del sensor
+Función de Inicialización del Sistema
+FUNCIÓN setup()
+
+    // === INICIALIZACIÓN DE COMUNICACIÓN SERIE ===
+    INICIALIZAR comunicación_serie CON velocidad 9600_baudios
+    // Permite enviar datos de depuración y resultados a la computadora
+
+    // === CONFIGURACIÓN DE PINES DIGITALES ===
+    CONFIGURAR BUTTON_PIN COMO entrada CON resistencia_pull_up_interna
+    // El botón se conecta a tierra, pull-up hace que esté en HIGH por defecto
+    
+    CONFIGURAR SENSOR_PIN COMO entrada
+    // Pin para detectar el paso del péndulo (sensor infrarrojo, magnético, etc.)
+
+    // === INICIALIZACIÓN DEL SERVOMOTOR ===
+    CONECTAR pendulumServo AL SERVO_PIN
+    // Establece la conexión con el servomotor
+
+    // === INICIALIZACIÓN DEL LCD ===
+    LLAMAR lcd.init()
+    // Inicializa la comunicación I2C con el LCD
+    
+    LLAMAR lcd.backlight()
+    // Enciende la retroiluminación del LCD
+    
+    LLAMAR lcd.clear()
+    // Limpia completamente la pantalla
+
+    // === PANTALLA DE BIENVENIDA (PRIMERA PANTALLA) ===
+    POSICIONAR cursor EN (0, 0)  // Primera fila, primera columna
+    MOSTRAR en LCD "Pendulo Simple"
+    
+    POSICIONAR cursor EN (0, 1)  // Segunda fila, primera columna
+    MOSTRAR en LCD "Angulo: "
+    MOSTRAR en LCD INITIAL_RELEASE_ANGLE_DEGREES sin decimales
+    MOSTRAR en LCD "deg"
+    // Resultado ejemplo: "Angulo: 30deg"
+    
+    ESPERAR 2000 milisegundos
+    // Permite al usuario leer la información del ángulo
+
+    // === PANTALLA DE INSTRUCCIONES (SEGUNDA PANTALLA) ===
+    LLAMAR lcd.clear()
+    // Limpia la pantalla para mostrar nuevo contenido
+    
+    POSICIONAR cursor EN (0, 0)
+    MOSTRAR en LCD "Pendulo Simple"
+    
+    POSICIONAR cursor EN (0, 1)
+    MOSTRAR en LCD "Presiona boton"
+    // Indica al usuario cómo iniciar el experimento
+
+    // === POSICIONAMIENTO INICIAL DEL SERVOMOTOR ===
+    MOVER pendulumServo A posición SERVO_HOLD_ANGLE
+    // Coloca el servo en posición para sostener la pesa del péndulo
+    // === ESTABLECER ESTADO INICIAL DEL SISTEMA ===
+    ASIGNAR currentState = STATE_IDLE
+    // Pone el sistema en estado de espera, listo para recibir comandos
+
+FIN FUNCIÓN
+
+Funcion que se ejecuta continuamente
+
+Funcion loop ()
+// === LECTURA DEL SENSOR ===
+sensorState = (leerDigital(sensor.pin) = bajo)
+//Convierte la lectura del pin en un booleano
+//Bajo o low significa que detecto un obstáculo
+//High o alto el sensor está libre de obstáculos
+	
+// === MÁQUINA DE ESTADOS PRINCIPAL ===
+    EVALUAR currentState:
+// ============================================
+// ESTADO 1: SISTEMA INACTIVO (ESPERANDO)
+// ============================================
+SI LEER_DIGITAL(BUTTON_PIN) == BAJO ENTONCES ESPERAR 50 ms 
+SI LEER_DIGITAL(BUTTON_PIN) == BAJO ENTONCES                     currentState = STATE_RELEASING
+Salir del case
+//La primera vez que el botón sea presionado el pin se configura en //low, el programa leerá 2 veces el pin para comprobar que //efectivamente fue presionado, tiempo después soltara el péndulo
+// ============================================
+// ESTADO 2: LIBERANDO LA PESO
+// ============================================
+LCD.limpiar()
+LCD.mostrar("Soltando peso...")
+LCD.posicionar_cursor(0, 1)
+LCD.mostrar("@" + INITIAL_RELEASE_ANGLE_DEGREES + " deg")
+//El programa limpia la lcd y muestra el mensaje que confirma que el peso fue liberado añadiéndole el Angulo inicial de lanzamiento
+// === LIBERAR MECÁNICAMENTE LA PESA ===
+MOVER pendulumServo A SERVO_RELEASE_ANGLE
+ESPERAR 1000 milisegundos  // Tiempo para que se libere completamente
+            
+// === PREPARAR PANTALLA DE MEDICIÓN ===
+LCD.limpiar()
+LCD.mostrar("Midiendo...")
+LCD.posicionar_cursor(0, 1) 
+LCD.mostrar("Osc: 0/" + NUM_OSCILLATIONS_FOR_AVG)
+// Muestra el mensaje midiendo y cuando reciba la señal el numero de oscilaciones que realizo 
+// === INICIALIZAR VARIABLES DE MEDICIÓN ===
+oscillationCount = 0
+sensorDebounceLock = falso
+lastSensorState = falso
+            
+// === CAMBIAR AL SIGUIENTE ESTADO ===
+currentState = STATE_ARMING_FIRST_PASS
+            
+SALIR del case
+// ============================================
+// ESTADO 3: DETECTANDO PRIMER PASO
+// ============================================
+CASO STATE_ARMING_FIRST_PASS:            
+// === DETECCIÓN DE FLANCO ASCENDENTE ===
+SI (sensorState == verdadero) Y (lastSensorState == falso) Y (sensorDebounceLock == falso) ENTONCES                
+// Primer paso detectado - iniciar cronómetro si el sensor cambia //su estado a activo, además que su ultimo estado sea falso y el //estado de bloqueo que se usa para evitar que el sensor detecte //cambios falsos también sea falso
+firstPassTime_ms = OBTENER_TIEMPO_ACTUAL_MS()
+sensorDebounceLock = verdadero
+lastSensorState = verdadero                
+// Cambiar a estado de medición a verdadero con el bloqueo activo //para evitar errores en la medidicon del T
+currentState = STATE_TIMING_HALF_PERIOD
+                
+IMPRIMIR_SERIE("ARMADO: Detectada 1ra senal (inicio de T/2).")
+                
+SINO SI (sensorState == falso) Y (lastSensorState == verdadero) ENTONCES
+// Objeto salió del sensor - liberar bloqueo para una nueva medición, en pocas palabras indica que el cuerpo ya paso por el sensor
+sensorDebounceLock = falso
+lastSensorState = falso
+FIN SI           
+SALIR del case
+
+// ============================================
+ 	// ESTADO 4: MIDIENDO PERÍODOS CONSECUTIVOS
+// ============================================
+CASO STATE_TIMING_HALF_PERIOD:
+            
+// === DETECCIÓN DE PASOS CONSECUTIVOS ===
+SI (sensorState == verdadero) Y (lastSensorState == falso) Y (sensorDebounceLock == falso) ENTONCES
+//La misma condición que se utiliza en el tercer caso en el inicio
+// === CÁLCULO DEL PERÍODO ===
+currentTime_ms = OBTENER_TIEMPO_ACTUAL_MS()
+halfPeriod_ms = currentTime_ms - firstPassTime_ms
+fullPeriod_ms = halfPeriod_ms × 2 
+// Resta a el timpo actual el primer tiempo detectada y duplica la //diferencia, ya que el pendulo es detectado cuando pasa por la mitad ósea medio periodo, por ende, a parte de restar es necesario duplicar el resultado         
+// === ALMACENAMIENTO DE DATOS ===
+SI oscillationCount < NUM_OSCILLATIONS_FOR_AVG ENTONCES
+      all_measured_periods_ms[oscillationCount] = fullPeriod_ms                    
+// === REPORTE POR SERIE ===
+IMPRIMIR_SERIE("Oscilacion Completa " + (oscillationCount + 1))
+IMPRIMIR_SERIE(": Intervalo(T/2) = " + halfPeriod_ms + " ms")
+IMPRIMIR_SERIE(", Oscilacion Completa (T) = " + fullPeriod_ms + " ms")
+//Si las oscilaciones detectadas son menores a la cantidad //establecida [10] entonces cada oscilación detectada se suma al //periodo. La pantalla imprime cada que la oscilación esta completa //y cuando esta a la mitad en el intervalo T/2 
+// === ACTUALIZACIÓN DE LCD ===
+LCD.posicionar_cursor(0, 1)
+LCD.mostrar("Osc:" + (oscillationCount + 1) + " T:" + fullPeriod_ms + "ms    ")
+FIN SI                
+// === ACTUALIZACIÓN DE CONTADORES ===
+oscillationCount++ //El contador se actualiza sumando 1
+firstPassTime_ms = currentTime_ms //El tiempo inicial se reescribe
+sensorDebounceLock = verdadero // se bloquea para volver a medir
+lastSensorState = verdadero
+//El ultimo estado es verdadero de esta forma se vuelve a cumplir //la condición inicial hasta que el contador llegue a 10
+// === VERIFICAR SI YA SE COMPLETARON TODAS LAS MEDICIONES ===
+SI oscillationCount >= NUM_OSCILLATIONS_FOR_AVG ENTONCES
+      currentState = STATE_CALCULATING
+      FIN SI
+               
+SINO SI (sensorState == falso) Y (lastSensorState == verdadero) ENTONCES
+// Objeto salió del sensor - liberar anti-rebote
+sensorDebounceLock = falso
+lastSensorState = falso
+ FIN SI
+SALIR del case
+
+// ============================================
+// ESTADO 5: PROCESANDO RESULTADOS
+// ============================================
+CASO STATE_CALCULATING:
+// === MOSTRAR ESTADO DE CÁLCULO === 
+LCD.limpiar()
+LCD.mostrar("Calculando...")
+IMPRIMIR_SERIE("Calculando resultados...")
+// === PROCESAR DATOS Y MOSTRAR RESULTADOS ===
+LLAMAR FUNCION calculateAndDisplayResults()
+// === RETORNAR SERVO A POSICIÓN INICIAL ===
+MOVER pendulumServo A Angulo inicial
+// === PREPARAR PARA NUEVA MEDICIÓN ===
+      LCD.limpiar()
+LCD.mostrar("Pendulo Simple")
+LCD.posicionar_cursor(0, 1)
+LCD.mostrar("Presiona boton")          
+// === VOLVER AL ESTADO INICIAL ===
+currentState = STATE_IDLE        
+SALIR del case
+//En resumen es el caso que reinicia el estado del Arduino para //volver a medir, brindando los datos de la función calcular y //desplegar datos
+    FIN EVALUAR
+
+FIN FUNCIÓN
+
+//Funciones de cálculos
+Funcion TiempoPromedio <- CalcularPromedio ( Tiempos, NumMediciones )
+    Definir i Como Entero
+    Definir suma Como Real
+    Para i<-1 Hasta NumMediciones Con Paso 1 Hacer
+        suma <- suma + Tiempos
+        TiempoPromedio <- suma/NumMediciones
+    Fin Para
+Fin Funcion
+FUNCIÓN encontrarNMasCercanosAlPromedio(originales[], nOriginales, salida[], nSalida)
+    SI nSalida = 0 O nOriginales = 0 ENTONCES
+        PARA i = 0 HASTA nSalida-1 HACER
+            salida[i] = 0
+        FIN PARA
+        RETORNAR
+    FIN SI
+    nSalidaReal = MÍNIMO(nSalida, nOriginales)
+    promedioGeneral = calcularPromedioMs(originales, nOriginales)
+    // Crear array de banderas para marcar elementos usados
+    CREAR usados[nOriginales] inicializado en FALSO
+    PARA i = 0 HASTA nSalidaReal-1 HACER
+        mejorIndice = -1
+        diferenciaMínima = VALOR_MUY_GRANDE
+        PARA j = 0 HASTA nOriginales-1 HACER
+            SI NO usados[j] ENTONCES
+                diferencia = VALOR_ABSOLUTO(originales[j] - promedioGeneral)
+                SI diferencia < diferenciaMínima ENTONCES
+                    diferenciaMínima = diferencia
+                    mejorIndice = j
+                FIN SI
+            FIN SI
+        FIN PARA
+        
+        SI mejorIndice ≠ -1 ENTONCES
+            salida[i] = originales[mejorIndice]
+            usados[mejorIndice] = VERDADERO
+        SINO
+            salida[i] = 0
+        FIN SI
+    FIN PARA
+    
+    // Llenar posiciones restantes con ceros
+    PARA i = nSalidaReal HASTA nSalida-1 HACER
+        salida[i] = 0
+    FIN PARA
+FIN FUNCIÓN
+
+//Esta función permite filtrar los datos y eliminar valores que son muy //extremos o lejanos al promedio
+Funcion IncertidumbreTipoA <- CalcularIncertidumbreTipoA ( Tiempos, NumMediciones )
+    Definir sumaCuadrados, promedio Como Real
+    Definir i Como Entero
+    
+    promedio <- CalcularPromedio(Tiempos, NumMediciones)
+    
+    Para i <- 1 Hasta NumMediciones Con Paso 1 Hacer
+        Definir  Diferencia Como Real
+        Diferencia <- Tiempos[i] - promedio
+        sumaCuadrados <- sumaCuadrados + Diferencia * DiferenciaFin
+        
+    FinPara
+    
+    IncertidumbreA <- raiz(sumaCuadrados / (NumMediciones * (NumMediciones - 1)))
+	
+Fin Funcion
+
+FUNCIÓN calculateAndDisplayResults()
+
+    // === VALIDACIÓN INICIAL ===
+    SI oscillationCount < 1 ENTONCES
+        ¡Mostrar en LCD “No hay datos!"
+        Mostrar en Serial "No hay datos para calcular."
+        Esperar 2 segundos
+        RETORNAR
+    FIN SI
+
+    // === MOSTRAR DATOS ORIGINALES ===
+    Imprimir en Serial "--- Todos los periodos COMPLETOS (T) medidos (ms) ---"
+    PARA i = 0 HASTA oscillationCount-1 HACER
+        Imprimir en Serial "T" + (i+1) + ": " + all_measured_periods_ms[i]
+    FIN PARA
+
+    // === DETERMINAR CANTIDAD PARA FILTRADO ===
+    actual_num_to_filter_for_calc = MÍNIMO(oscillationCount, N_FILTERED_VALUES)
+    
+    SI oscillationCount < N_FILTERED_VALUES Y oscillationCount > 0 ENTONCES
+        Mostrar advertencia de pocas mediciones en Serial
+    FIN SI
+// Comprueba que los datos fueron medidos correctamente, ademas imprime //en la lcd cada uno para posteriormente aplicar el filtrado de datos
+    // === APLICAR FILTRO ESTADÍSTICO ===
+    LLAMAR findNClosestToAverage(
+        all_measured_periods_ms, 
+        oscillationCount, 
+        filtered_periods_ms, 
+        actual_num_to_filter_for_calc
+    )
+
+    // === MOSTRAR DATOS FILTRADOS ===
+    Imprimir en Serial "--- Periodos Filtrados (ms) ---"
+    PARA i = 0 HASTA actual_num_to_filter_for_calc-1 HACER
+        Imprimir en Serial "Tf" + (i+1) + ": " + filtered_periods_ms[i]
+    FIN PARA
+
+    // === CALCULAR PERÍODO PROMEDIO ===
+    avg_measured_period_ms = LLAMAR calculateAverageMs(filtered_periods_ms, actual_num_to_filter_for_calc)
+    avg_measured_period_s = avg_measured_period_ms / 1000.0
+
+    // === CORRECCIÓN POR ÁNGULO GRANDE ===
+    theta_rad = INITIAL_RELEASE_ANGLE_DEGREES × π / 180.0
+    sin_half_theta = seno(theta_rad / 2.0)
+    K_correction_factor = 1.0 + (1.0/4.0) × sin_half_theta²
+    
+    avg_corrected_period_s = avg_measured_period_s
+    
+    SI INITIAL_RELEASE_ANGLE_DEGREES > 0.1 Y K_correction_factor > 0.001 ENTONCES
+        avg_corrected_period_s = avg_measured_period_s / K_correction_factor
+        Imprimir factor de corrección y períodos en Serial
+    FIN SI
+//En física avanzada no todos los angulos se pueden usar para la formula conocida, por ende se ajusta el angulo en caso de que se salga de esos estandares
+    // === CÁLCULO DE INCERTIDUMBRES ===
+    std_dev_filtered_period_ms = LLAMAR calculateStdDevMs(
+        filtered_periods_ms, 
+        actual_num_to_filter_for_calc, 
+        avg_measured_period_ms
+    )
+    
+    // Incertidumbre tipo A (estadística)
+    SI actual_num_to_filter_for_calc > 0 ENTONCES
+        uncertainty_A_period_ms = std_dev_filtered_period_ms / √(actual_num_to_filter_for_calc)
+    SINO
+        uncertainty_A_period_ms = 0.0
+    FIN SI
+    
+    // Incertidumbre combinada (A + B)
+    uncertainty_C_period_ms = √(uncertainty_A_period_ms² + ERROR_TIPO_B_MS²)
+    uncertainty_C_measured_period_s = uncertainty_C_period_ms / 1000.0
+
+    // === CÁLCULO DE LA GRAVEDAD ===
+    calculated_g = 0.0
+    SI avg_corrected_period_s > 0.0001 ENTONCES
+        calculated_g = (4 × π² × PENDULUM_LENGTH) / avg_corrected_period_s²
+    FIN SI
+
+    // === PROPAGACIÓN DE ERRORES PARA GRAVEDAD ===
+    uncertainty_g = 0.0
+    SI avg_measured_period_s > 0.0001 Y PENDULUM_LENGTH > 0.0001 Y actual_num_to_filter_for_calc > 0 ENTONCES
+        rel_err_L_sq = (ERROR_LONGITUD / PENDULUM_LENGTH)²
+        rel_err_T_sq = (2.0 × uncertainty_C_measured_period_s / avg_measured_period_s)²
+        uncertainty_g = calculated_g × √(rel_err_L_sq + rel_err_T_sq)
+    FIN SI
+    
+    SI actual_num_to_filter_for_calc ≤ 1 ENTONCES
+        uncertainty_g = 0
+    FIN SI
+
+    // === CÁLCULO DEL ERROR PORCENTUAL ===
+    SI KNOWN_GRAVITY > 0.0001 ENTONCES
+        percentError = (|calculated_g - KNOWN_GRAVITY| / KNOWN_GRAVITY) × 100.0
+    SINO
+        percentError = 0.0
+    FIN SI
+// Funciones de cálculos matemáticos y propagación de error
+    // === MOSTRAR RESULTADOS EN LCD ===
+    
+    // Pantalla 1: Período medido e incertidumbre
+    LCD.limpiar()
+    LCD.línea1("Tmed(f):" + avg_measured_period_s + "s")
+    LCD.línea2("u(Tm):+/-" + uncertainty_C_measured_period_s)
+    Esperar 5 segundos
+
+    // Pantalla 2: Gravedad calculada e incertidumbre
+    LCD.limpiar()
+    LCD.línea1("g_calc:" + calculated_g)
+    LCD.línea2("u(g):+/-" + uncertainty_g)
+    Esperar 5 segundos
+
+    // Pantalla 3: Error porcentual y gravedad conocida
+    LCD.limpiar()
+    LCD.línea1("%Error: " + percentError + "%")
+    LCD.línea2("g_conoc: " + KNOWN_GRAVITY)
+    Esperar 5 segundos
+
+    // === REPORTE COMPLETO EN SERIAL ===
+    Imprimir en Serial "--- Resultados Finales ---"
+    Imprimir ángulo de liberación
+    Imprimir período medido promedio filtrado (ms y s)
+    
+    SI INITIAL_RELEASE_ANGLE_DEGREES > 0.1 ENTONCES
+        Imprimir período corregido a ángulo pequeño (ms y s)
+    FIN SI
+    
+    Imprimir incertidumbre combinada del período (ms y s)
+    Imprimir gravedad calculada (m/s²)
+    Imprimir incertidumbre de la gravedad (m/s²)
+    Imprimir gravedad conocida (m/s²)
+    Imprimir porcentaje de error (%)
+    Imprimir línea separadora
+
+FIN FUNCIÓN
